@@ -121,6 +121,37 @@ static unsigned long (MS_FAR *id_callback)(void)=0;
 #endif
 static void (MS_FAR *threadid_callback)(CRYPTO_THREADID *)=0;
 
+#if defined(OPENSSL_SYS_WIN32) && defined(INIT_ONCE_STATIC_INIT)
+static BOOL CRYPTO_ONCE_init_function(PINIT_ONCE o, PVOID p, PVOID *c)
+        {
+        void (*f)(void) = p;
+        f();
+        return TRUE;
+        }
+
+int CRYPTO_ONCE_once(CRYPTO_ONCE *once, CRYPTO_ONCE_callback init_cb, void *out)
+        {
+        /* Lowest common denominator (pthreads) -> no arguments to init_cb */
+        if (InitOnceExecuteOnce(once, CRYPTO_ONCE_init_function, init_cb, out))
+                return 1;
+        return 0;
+        }
+#elif defined(HAVE_PTHREAD)
+int CRYPTO_ONCE_once(CRYPTO_ONCE *once, CRYPTO_ONCE_callback init_cb, void *out)
+        {
+        if (pthread_once(once, init_cb) == 0)
+                return 1;
+        return 0;
+        }
+#else
+/* Add real implementation of CRYPTO_ONCE_once() */
+int CRYPTO_ONCE_once(CRYPTO_ONCE *once, CRYPTO_ONCE_callback init_cb, void *out)
+        {
+        init_cb();
+        return 1;
+        }
+#endif
+
 /* the memset() here and in set_pointer() seem overkill, but for the sake of
  * CRYPTO_THREADID_cmp() this avoids any platform silliness that might cause two
  * "equal" THREADID structs to not be memcmp()-identical. */

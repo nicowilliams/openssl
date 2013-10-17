@@ -121,6 +121,10 @@
 
 #include <openssl/e_os2.h>
 
+#if defined(HAVE_PTHREAD) && !defined(OPENSSL_SYS_WIN32)
+#include <pthread.h>
+#endif
+
 #ifndef OPENSSL_NO_FP_API
 #include <stdio.h>
 #endif
@@ -426,6 +430,16 @@ void *CRYPTO_get_ex_data(const CRYPTO_EX_DATA *ad,int idx);
 /* This function cleans up all "ex_data" state. It mustn't be called under
  * potential race-conditions. */
 void CRYPTO_cleanup_all_ex_data(void);
+
+typedef void (*CRYPTO_ONCE_callback)(void);
+
+#if defined(OPENSSL_SYS_WIN32) && defined(INIT_ONCE_STATIC_INIT)
+typedef INIT_ONCE CRYPTO_ONCE;
+#elif defined(HAVE_PTHREAD)
+typedef pthread_once_t CRYPTO_ONCE;
+#else
+typedef struct CRYPTO_ONCE CRYPTO_ONCE;
+#endif
 
 int CRYPTO_get_new_lockid(char *name);
 
