@@ -431,7 +431,7 @@ void *CRYPTO_get_ex_data(const CRYPTO_EX_DATA *ad,int idx);
  * potential race-conditions. */
 void CRYPTO_cleanup_all_ex_data(void);
 
-typedef void (*CRYPTO_ONCE_callback)(void);
+typedef int (*CRYPTO_ONCE_callback)(void *, void *);
 
 #if defined(OPENSSL_SYS_WIN32) && defined(INIT_ONCE_STATIC_INIT)
 typedef INIT_ONCE CRYPTO_ONCE;
@@ -440,6 +440,8 @@ typedef pthread_once_t CRYPTO_ONCE;
 #else
 typedef struct CRYPTO_ONCE CRYPTO_ONCE;
 #endif
+
+int CRYPTO_ONCE_once(CRYPTO_ONCE *once, CRYPTO_ONCE_callback init_cb, void *data, void *out);
 
 int CRYPTO_get_new_lockid(char *name);
 

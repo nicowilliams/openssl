@@ -122,33 +122,65 @@ static unsigned long (MS_FAR *id_callback)(void)=0;
 static void (MS_FAR *threadid_callback)(CRYPTO_THREADID *)=0;
 
 #if defined(OPENSSL_SYS_WIN32) && defined(INIT_ONCE_STATIC_INIT)
-static BOOL CRYPTO_ONCE_init_function(PINIT_ONCE o, PVOID p, PVOID *c)
+static BOOL CRYPTO_ONCE_init_function(PINIT_ONCE o, PINIT_ONCE_FN callback, PVOID data, PVOID *out)
         {
-        void (*f)(void) = p;
-        f();
-        return TRUE;
+        return ((CRYPTO_ONCE_callback)callback)(data, out) == 1;
         }
 
-int CRYPTO_ONCE_once(CRYPTO_ONCE *once, CRYPTO_ONCE_callback init_cb, void *out)
+int CRYPTO_ONCE_once(CRYPTO_ONCE *once, CRYPTO_ONCE_callback callback, void *data, void *out)
         {
-        /* Lowest common denominator (pthreads) -> no arguments to init_cb */
-        if (InitOnceExecuteOnce(once, CRYPTO_ONCE_init_function, init_cb, out))
-                return 1;
-        return 0;
+        if (InitOnceExecuteOnce(once, CRYPTO_ONCE_init_function, callback, data, out) == FALSE)
+                return FALSE;
+        return TRUE;
         }
 #elif defined(HAVE_PTHREAD)
-int CRYPTO_ONCE_once(CRYPTO_ONCE *once, CRYPTO_ONCE_callback init_cb, void *out)
+/*
+ * We implement semantics closer to Win32's InitOnceExecuteOnce(),
+ * particularly because we need to pass an argument to the callback but
+ * pthread_once() provides no way to do that(!).  We resort to using
+ * thread-specific data to pass that one argument, and while we're at it
+ * we provide a bit more of the Win32 API's semantics.  Note that we
+ * assume that pthread_once() implies a memory barrier.
+ */
+static pthread_key_t once_arg_key;
+static pthread_once_t once_arg_key_once = PTHREAD_ONCE_INIT;
+struct once_arg
         {
+        CRYPTO_ONCE_callback callback;
+        void *data;
+        void *out;
+        int result;
+        };
+static void once_arg_key_once_init(void *data)
+        {
+        (void) pthread_key_create(&once_arg_key, NULL);
+        }
+static void CRYPTO_ONCE_init_function(void)
+        {
+        struct once_arg *once_arg = pthread_getspecific(once_arg_key);
+        if (once_arg != NULL)
+                once_arg->result = once_arg->callback(once_arg->data, once_arg->out);
+        }
+int CRYPTO_ONCE_once(CRYPTO_ONCE *once, CRYPTO_ONCE_callback init_cb, void *data, void *out)
+        {
+        struct once_arg once_arg;
+        once_arg.callback = init_cb;
+        once_arg.data = data;
+        once_arg.out = out;
+        once_arg.result = 0;
+        if (pthread_once(once_arg_key_once, once_arg_key_once_init) != 0)
+                return 0;
+        if (pthread_setspecific(&once_arg_key, data) != 0)
+                return 0;
         if (pthread_once(once, init_cb) == 0)
-                return 1;
+                return once_arg.result;
         return 0;
         }
 #else
 /* Add real implementation of CRYPTO_ONCE_once() */
-int CRYPTO_ONCE_once(CRYPTO_ONCE *once, CRYPTO_ONCE_callback init_cb, void *out)
+int CRYPTO_ONCE_once(CRYPTO_ONCE *once, CRYPTO_ONCE_callback init_cb, void *data, void *out)
         {
-        init_cb();
-        return 1;
+        return init_cb(data, out);
         }
 #endif
 
