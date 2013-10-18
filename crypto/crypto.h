@@ -435,8 +435,10 @@ typedef int (*CRYPTO_ONCE_callback)(void *, void *);
 
 #if defined(OPENSSL_SYS_WIN32) && defined(INIT_ONCE_STATIC_INIT)
 typedef INIT_ONCE CRYPTO_ONCE;
+#define CRYPTO_ONCE_INIT INIT_ONCE_STATIC_INIT
 #elif defined(HAVE_PTHREAD)
 typedef pthread_once_t CRYPTO_ONCE;
+#define CRYPTO_ONCE_INIT PTHREAD_ONCE_INIT
 #else
 typedef struct CRYPTO_ONCE CRYPTO_ONCE;
 #endif

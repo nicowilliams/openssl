@@ -184,6 +184,34 @@ int CRYPTO_ONCE_once(CRYPTO_ONCE *once, CRYPTO_ONCE_callback init_cb, void *data
         }
 #endif
 
+static CRYPTO_ONCE threadid_callback_once = CRYPTO_ONCE_INIT;
+
+static int THREADID_set_callback_once_callback(void *data, void *out)
+        {
+	if (threadid_callback == NULL)
+                threadid_callback = data;
+        return 1;
+        }
+
+static void THREADID_callback_default(CRYPTO_THREADID id)
+        {
+#ifdef OPENSSL_SYS_WIN16
+	CRYPTO_THREADID_set_numeric(id, (unsigned long)GetCurrentTask());
+#elif defined(OPENSSL_SYS_WIN32)
+	CRYPTO_THREADID_set_numeric(id, (unsigned long)GetCurrentThreadId());
+#elif defined(OPENSSL_SYS_BEOS)
+	CRYPTO_THREADID_set_numeric(id, (unsigned long)find_thread(NULL));
+#else
+        /*
+         * For everything else, default to using the address of 'errno'
+         * On POSIX we can't use pthread_self() because pthread_t is so
+         * opaque we can't even compare values of that type with the C
+         * equality comparison operators.
+         */
+	CRYPTO_THREADID_set_pointer(id, (void*)&errno);
+#endif
+        }
+
 /* the memset() here and in set_pointer() seem overkill, but for the sake of
  * CRYPTO_THREADID_cmp() this avoids any platform silliness that might cause two
  * "equal" THREADID structs to not be memcmp()-identical. */
@@ -232,25 +260,34 @@ void CRYPTO_THREADID_set_pointer(CRYPTO_THREADID *id, void *ptr)
 
 int CRYPTO_THREADID_set_callback(void (*func)(CRYPTO_THREADID *))
 	{
-	if (threadid_callback)
-		return 0;
-	threadid_callback = func;
-	return 1;
+        return CRYPTO_ONCE_once(threadid_callback_once,
+                                THREADID_set_callback_once_callback, func);
+        if (threadid_callback != func)
+                return 0;
+        return 1;
 	}
 
 void (*CRYPTO_THREADID_get_callback(void))(CRYPTO_THREADID *)
 	{
+        (void)CRYPTO_ONCE_once(threadid_callback_once,
+                               THREADID_set_callback_once_callback,
+                               THREADID_callback_default);
 	return threadid_callback;
 	}
 
 void CRYPTO_THREADID_current(CRYPTO_THREADID *id)
 	{
+        (void)CRYPTO_ONCE_once(threadid_callback_once,
+                               THREADID_set_callback_once_callback,
+                               THREADID_callback_default);
+        /* OPENSSL_assert(threadid_callback); */
 	if (threadid_callback)
 		{
 		threadid_callback(id);
 		return;
 		}
 #ifndef OPENSSL_NO_DEPRECATED
+        /* XXX Fix this */
 	/* If the deprecated callback was set, fall back to that */
 	if (id_callback)
 		{
