@@ -89,33 +89,56 @@ int RAND_set_rand_method(const RAND_METHOD *meth)
 	return 1;
 	}
 
+static CRYPTO_ONCE rand_init_once = CRYPTO_ONCE_INIT;
+
+static int rand_init_once_cb(void *data, void *out)
+        {
+        RAND_METHOD **m = out;
+#ifndef OPENSSL_NO_ENGINE
+        ENGINE *e = ENGINE_get_default_RAND();
+        if(e)
+                {
+                default_RAND_meth = ENGINE_get_RAND(e);
+                if(!default_RAND_meth)
+                        {
+                        ENGINE_finish(e);
+                        e = NULL;
+                        }
+                }
+        if(e)
+                funct_ref = e;
+        else
+#endif
+                default_RAND_meth = RAND_SSLeay();
+        return 1;
+        }
+
 const RAND_METHOD *RAND_get_rand_method(void)
 	{
 	if (!default_RAND_meth)
-		{
-#ifndef OPENSSL_NO_ENGINE
-		ENGINE *e = ENGINE_get_default_RAND();
-		if(e)
-			{
-			default_RAND_meth = ENGINE_get_RAND(e);
-			if(!default_RAND_meth)
-				{
-				ENGINE_finish(e);
-				e = NULL;
-				}
-			}
-		if(e)
-			funct_ref = e;
-		else
-#endif
-			default_RAND_meth = RAND_SSLeay();
-		}
+                {
+                CRYPTO_ONCE_once(&rand_init_once,
+                                 rand_init_once_cb,
+                                 NULL, NULL);
+                }
+        OPENSSL_assert(default_RAND_meth);
 	return default_RAND_meth;
 	}
 
 #ifndef OPENSSL_NO_ENGINE
 int RAND_set_rand_engine(ENGINE *engine)
 	{
+        /*
+         * XXX Should we disallow this once default_RAND_meth is set?
+         * If we don't disallow it then we have a thread-safety problem.
+         * If we do disallow it then some callers will get a RAND_METHOD
+         * other than the one they wanted, and that might be a big
+         * problem.  We could really use something like RCU here:
+         * because the race is between reading default_RAND_meth and
+         * freeing an old value of it.  For now we should disallow
+         * changes: sorry, you gotta initialize everything first if you
+         * want things the way you want them, *then* use them.
+         */
 	const RAND_METHOD *tmp_meth = NULL;
 	if(engine)
 		{
@@ -129,6 +152,7 @@ int RAND_set_rand_engine(ENGINE *engine)
 			}
 		}
 	/* This function releases any prior ENGINE so call it first */
+        /* XXX NOT THREAD-SAFE!!! */
 	RAND_set_rand_method(tmp_meth);
 	funct_ref = engine;
 	return 1;
