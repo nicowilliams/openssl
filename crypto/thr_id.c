@@ -116,20 +116,35 @@
 
 #include "cryptlib.h"
 
+#ifdef OPENSSL_USE_OS_THREAD_LIB
+#define OPENSSL_DEFAULT_THREAD_ID_CB THREADID_callback_default
+#else
+#define OPENSSL_DEFAULT_THREAD_ID_CB 0
+#endif
+
 #ifndef OPENSSL_NO_DEPRECATED
 static unsigned long (MS_FAR *id_callback)(void)=0;
 #endif
-static void (MS_FAR *threadid_callback)(CRYPTO_THREADID *)=0;
+static void (MS_FAR *threadid_callback)(CRYPTO_THREADID *)=OPENSSL_DEFAULT_THREAD_ID_CB;
 
 #if defined(OPENSSL_SYS_WIN32) && defined(INIT_ONCE_STATIC_INIT)
+struct once_arg
+        {
+        CRYPTO_ONCE_callback callback;
+        void *data;
+        };
 static BOOL CRYPTO_ONCE_init_function(PINIT_ONCE o, PINIT_ONCE_FN callback, PVOID data, PVOID *out)
         {
-        return ((CRYPTO_ONCE_callback)callback)(data, out) == 1;
+        struct once_arg *once_arg = data;
+        return once_arg->callback(once_arg->data, out) == 1;
         }
 
-int CRYPTO_ONCE_once(CRYPTO_ONCE *once, CRYPTO_ONCE_callback callback, void *data, void *out)
+int CRYPTO_ONCE_once(CRYPTO_ONCE *once, CRYPTO_ONCE_callback init_cb, void *data, void *out)
         {
-        if (InitOnceExecuteOnce(once, CRYPTO_ONCE_init_function, callback, data, out) == FALSE)
+        struct once_arg once_arg;
+        once_arg.callback = init_cb;
+        once_arg.data = data;
+        if (InitOnceExecuteOnce(once, CRYPTO_ONCE_init_function, &once_arg, out) == FALSE)
                 return FALSE;
         return TRUE;
         }
@@ -138,9 +153,10 @@ int CRYPTO_ONCE_once(CRYPTO_ONCE *once, CRYPTO_ONCE_callback callback, void *dat
  * We implement semantics closer to Win32's InitOnceExecuteOnce(),
  * particularly because we need to pass an argument to the callback but
  * pthread_once() provides no way to do that(!).  We resort to using
- * thread-specific data to pass that one argument, and while we're at it
- * we provide a bit more of the Win32 API's semantics.  Note that we
- * assume that pthread_once() implies a memory barrier.
+ * thread-specific storage pointing to an automatic struct to pass that
+ * one argument, and while we're at it we provide a bit more of the
+ * Win32 API's semantics.  Note that we assume that pthread_once()
+ * implies a memory barrier (which, of course, it must and does).
  */
 static pthread_key_t once_arg_key;
 static pthread_once_t once_arg_key_once = PTHREAD_ONCE_INIT;
@@ -170,14 +186,14 @@ int CRYPTO_ONCE_once(CRYPTO_ONCE *once, CRYPTO_ONCE_callback init_cb, void *data
         once_arg.result = 0;
         if (pthread_once(&once_arg_key_once, once_arg_key_once_init) != 0)
                 return 0;
-        if (pthread_setspecific(once_arg_key, data) != 0)
+        if (pthread_setspecific(once_arg_key, &once_arg) != 0)
                 return 0;
         if (pthread_once(once, CRYPTO_ONCE_init_function) == 0)
                 return once_arg.result;
         return 0;
         }
 #else
-/* Add real implementation of CRYPTO_ONCE_once() */
+/* TODO Add real implementation of CRYPTO_ONCE_once() for other systems. */
 int CRYPTO_ONCE_once(CRYPTO_ONCE *once, CRYPTO_ONCE_callback init_cb, void *data, void *out)
         {
         return init_cb(data, out);
