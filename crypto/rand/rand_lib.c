@@ -108,7 +108,10 @@ static int rand_init_once_cb(void *data, void *out)
                 funct_ref = e;
         else
 #endif
+                {
                 default_RAND_meth = RAND_SSLeay();
+                RAND_poll();
+                }
         return 1;
         }
 
