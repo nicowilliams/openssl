@@ -108,7 +108,10 @@ static int rand_init_once_cb(void *data, void *out)
                 funct_ref = e;
         else
 #endif
+                {
                 default_RAND_meth = RAND_SSLeay();
+                RAND_poll(); /* XXX Is this safe, or must we acquire some lock? */
+                }
         return 1;
         }
 
