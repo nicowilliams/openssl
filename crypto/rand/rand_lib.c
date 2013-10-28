@@ -93,7 +93,6 @@ static CRYPTO_ONCE rand_init_once = CRYPTO_ONCE_INIT;
 
 static int rand_init_once_cb(void *data, void *out)
         {
-        RAND_METHOD **m = out;
 #ifndef OPENSSL_NO_ENGINE
         ENGINE *e = ENGINE_get_default_RAND();
         if(e)
