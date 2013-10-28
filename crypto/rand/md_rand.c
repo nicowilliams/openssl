@@ -160,6 +160,20 @@ static unsigned int crypto_lock_rand = 0; /* may be set only when a thread
 /* access to lockin_thread is synchronized by CRYPTO_LOCK_RAND2 */
 static CRYPTO_THREADID locking_threadid; /* valid iff crypto_lock_rand is set */
 
+/*
+ * Apps should never fork() then call RAND_*() on the child-side of fork
+ * without first exec()ing.  But we try to not fail in subtle but
+ * catastrophic ways by reseeding the RNG on first use on the child
+ * side.
+ */
+static int must_reseed = 0; /* for setting by child atfork handler */
+#ifdef HAVE_PTHREAD
+static void set_must_reseed(void)
+        {
+        must_reseed = 1;
+        }
+#endif
+
 
 #ifdef PREDICT
 int rand_predictable=0;
@@ -433,10 +447,15 @@ static int ssleay_rand_bytes(unsigned char *buf, int num, int pseudo)
 	CRYPTO_w_unlock(CRYPTO_LOCK_RAND2);
 	crypto_lock_rand = 1;
 
-	if (!initialized)
+	if (!initialized || must_reseed)
 		{
 		RAND_poll();
+#ifdef HAVE_PTHREAD
+                if (!initialized)
+                        pthread_atfork(NULL, NULL, set_must_reseed);
+#endif
 		initialized = 1;
+                must_reseed = 0;
 		}
 	
 	if (!stirred_pool)
@@ -645,10 +664,15 @@ static int ssleay_rand_status(void)
 		crypto_lock_rand = 1;
 		}
 	
-	if (!initialized)
+	if (!initialized || must_reseed)
 		{
 		RAND_poll();
+#ifdef HAVE_PTHREAD
+                if (!initialized)
+                        pthread_atfork(NULL, NULL, set_must_reseed);
+#endif
 		initialized = 1;
+                must_reseed = 0;
 		}
 
 	ret = entropy >= ENTROPY_NEEDED;
