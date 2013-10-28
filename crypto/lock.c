@@ -184,7 +184,6 @@ static STACK_OF(OPENSSL_STRING) *app_locks=NULL;
    numbers.  */
 static STACK_OF(CRYPTO_dynlock) *dyn_locks=NULL;
 
-
 static void (MS_FAR *locking_callback)(int mode,int type,
 	const char *file,int line)=0;
 static int (MS_FAR *add_lock_callback)(int *pointer,int amount,
@@ -195,6 +194,111 @@ static void (MS_FAR *dynlock_lock_callback)(int mode,
 	struct CRYPTO_dynlock_value *l, const char *file,int line)=0;
 static void (MS_FAR *dynlock_destroy_callback)(struct CRYPTO_dynlock_value *l,
 	const char *file,int line)=0;
+
+static CRYPTO_ONCE locking_callback_once = CRYPTO_ONCE_INIT;
+static CRYPTO_ONCE add_lock_callback_once = CRYPTO_ONCE_INIT;
+
+/*
+ * NOTE: the default inplementation is a mutex, but mostly what's used
+ * is CRYPTO_[rw]_lock(), so we might do well to have a default
+ * implementation that uses rw locks instead of mutexes.
+ */
+#ifdef OPENSSL_SYS_WIN32
+static HANDLE *lock_cs;
+#elif HAVE_PTHREAD
+static pthread_mutex_t *lock_cs;
+#else
+/* XXX Add all the OS support from crypto/thread/ *.c */
+#endif
+
+static void default_locking_callback_default(int mode, int type, const
+					     char *file, int line)
+	{
+#ifdef OPENSSL_SYS_WIN32
+	if (mode & CRYPTO_LOCK)
+		{
+		WaitForSingleObject(lock_cs[type],INFINITE);
+		}
+	else
+		{
+		ReleaseMutex(lock_cs[type]);
+		}
+	}
+	return;
+#elif HAVE_PTHREAD
+	if (mode & CRYPTO_LOCK)
+		pthread_mutex_lock(&(lock_cs[type]));
+	else
+		pthread_mutex_unlock(&(lock_cs[type]));
+#else
+	/* XXX Add all the OS support from crypto/thread/ *.c */
+#endif
+	}
+
+static void default_locking_init(void)
+	{
+#ifdef OPENSSL_SYS_WIN32
+	int i;
+	lock_cs=OPENSSL_malloc(CRYPTO_num_locks() * sizeof(HANDLE));
+	for (i=0; i<CRYPTO_num_locks(); i++)
+		lock_cs[i]=CreateMutex(NULL,FALSE,NULL);
+#elif HAVE_PTHREAD
+	int i;
+	lock_cs=OPENSSL_malloc(CRYPTO_num_locks() * sizeof(pthread_mutex_t));
+	for (i=0; i<CRYPTO_num_locks(); i++)
+		pthread_mutex_init(&(lock_cs[i]),NULL);
+#else
+	/* XXX Add all the OS support from crypto/thread/ *.c */
+#endif
+	}
+
+static int set_locking_callback_once_callback(void *data, void *out)
+        {
+	if (locking_callback == NULL)
+		{
+		if (default_locking_callback_default == data)
+			default_locking_init(); /* Create the locks */
+                locking_callback = data;
+		}
+        return 1;
+        }
+
+
+static int set_add_lock_callback_once_callback(void *data, void *out)
+        {
+	if (add_lock_callback == NULL)
+                add_lock_callback = data;
+        return 1;
+        }
+
+static int default_add_lock(int *pointer, int amount, int type, const char *file,
+	     int line)
+	{
+	int ret = 0;
+
+	/*
+	 * XXX Should try to use OPENSSL_atomic_add() if we know we have
+	 * one that works.  Using a global lock won't perform very well.
+	 */
+	CRYPTO_lock(CRYPTO_LOCK|CRYPTO_WRITE,type,file,line);
+
+	ret= *pointer+amount;
+#ifdef LOCK_DEBUG
+	{
+	CRYPTO_THREADID id;
+	CRYPTO_THREADID_current(&id);
+	fprintf(stderr,"ladd:%08lx:%2d+%2d->%2d %-18s %s:%d\n",
+		CRYPTO_THREADID_hash(&id),
+		*pointer,amount,ret,
+		CRYPTO_get_lock_name(type),
+		file,line);
+	}
+#endif
+	*pointer=ret;
+	CRYPTO_lock(CRYPTO_UNLOCK|CRYPTO_WRITE,type,file,line);
+	return ret;
+	}
+
 
 int CRYPTO_get_new_lockid(char *name)
 	{
@@ -399,12 +503,19 @@ void CRYPTO_set_dynlock_destroy_callback(void (*func)
 void (*CRYPTO_get_locking_callback(void))(int mode,int type,const char *file,
 		int line)
 	{
+	(void)CRYPTO_ONCE_once(&locking_callback_once,
+			       set_locking_callback_once_callback,
+			       default_locking_callback_default, NULL);
 	return(locking_callback);
 	}
 
 int (*CRYPTO_get_add_lock_callback(void))(int *num,int mount,int type,
 					  const char *file,int line)
 	{
+	(void)CRYPTO_ONCE_once(&add_lock_callback_once,
+			       set_add_lock_callback_once_callback,
+			       default_add_lock, NULL);
+	OPENSSL_assert(add_lock_callback);
 	return(add_lock_callback);
 	}
 
@@ -412,14 +523,21 @@ void CRYPTO_set_locking_callback(void (*func)(int mode,int type,
 					      const char *file,int line))
 	{
 #ifdef OPENSSL_FIPS
+	/* XXX This needs to be made safe too */
 	FIPS_set_locking_callbacks(CRYPTO_lock, CRYPTO_add_lock);
 #endif
-	locking_callback=func;
+	(void)CRYPTO_ONCE_once(&locking_callback_once,
+			       set_locking_callback_once_callback,
+			       func, NULL);
+	OPENSSL_assert(locking_callback);
 	}
 
 void CRYPTO_set_add_lock_callback(int (*func)(int *num,int mount,int type,
 					      const char *file,int line))
 	{
+	(void)CRYPTO_ONCE_once(&add_lock_callback_once,
+			       set_add_lock_callback_once_callback,
+			       func, NULL);
 	add_lock_callback=func;
 	}
 
@@ -465,52 +583,41 @@ void CRYPTO_lock(int mode, int type, const char *file, int line)
 			}
 		}
 	else
+		{
+		(void)CRYPTO_ONCE_once(&locking_callback_once,
+				       set_locking_callback_once_callback,
+				       default_locking_callback_default,
+				       NULL);
 		if (locking_callback != NULL)
 			locking_callback(mode,type,file,line);
+		}
 	}
 
 int CRYPTO_add_lock(int *pointer, int amount, int type, const char *file,
-	     int line)
+		    int line)
 	{
 	int ret = 0;
 
-	if (add_lock_callback != NULL)
-		{
+	(void)CRYPTO_ONCE_once(&add_lock_callback_once,
+			       set_add_lock_callback_once_callback,
+			       default_add_lock, NULL);
+	OPENSSL_assert(add_lock_callback);
+
 #ifdef LOCK_DEBUG
-		int before= *pointer;
+	int before= *pointer;
 #endif
 
-		ret=add_lock_callback(pointer,amount,type,file,line);
+	ret=add_lock_callback(pointer,amount,type,file,line);
 #ifdef LOCK_DEBUG
-		{
-		CRYPTO_THREADID id;
-		CRYPTO_THREADID_current(&id);
-		fprintf(stderr,"ladd:%08lx:%2d+%2d->%2d %-18s %s:%d\n",
-			CRYPTO_THREADID_hash(&id), before,amount,ret,
-			CRYPTO_get_lock_name(type),
-			file,line);
-		}
+	{
+	CRYPTO_THREADID id;
+	CRYPTO_THREADID_current(&id);
+	fprintf(stderr,"ladd:%08lx:%2d+%2d->%2d %-18s %s:%d\n",
+		CRYPTO_THREADID_hash(&id), before,amount,ret,
+		CRYPTO_get_lock_name(type),
+		file,line);
+	}
 #endif
-		}
-	else
-		{
-		CRYPTO_lock(CRYPTO_LOCK|CRYPTO_WRITE,type,file,line);
-
-		ret= *pointer+amount;
-#ifdef LOCK_DEBUG
-		{
-		CRYPTO_THREADID id;
-		CRYPTO_THREADID_current(&id);
-		fprintf(stderr,"ladd:%08lx:%2d+%2d->%2d %-18s %s:%d\n",
-			CRYPTO_THREADID_hash(&id),
-			*pointer,amount,ret,
-			CRYPTO_get_lock_name(type),
-			file,line);
-		}
-#endif
-		*pointer=ret;
-		CRYPTO_lock(CRYPTO_UNLOCK|CRYPTO_WRITE,type,file,line);
-		}
 	return(ret);
 	}
 
