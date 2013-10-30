@@ -197,12 +197,30 @@ static void (MS_FAR *dynlock_destroy_callback)(struct CRYPTO_dynlock_value *l,
 
 static CRYPTO_ONCE locking_callback_once = CRYPTO_ONCE_INIT;
 static CRYPTO_ONCE add_lock_callback_once = CRYPTO_ONCE_INIT;
+static CRYPTO_ONCE dynlocking_callback_once = CRYPTO_ONCE_INIT;
+
+struct dynlocking_once_arg
+	{
+	struct CRYPTO_dynlock_value *(*dyn_create_function)(const char *file, int line);
+	void (*dyn_lock_function)(int mode, struct CRYPTO_dynlock_value *l, const char *file, int line);
+	void (*dyn_destroy_function)(struct CRYPTO_dynlock_value *l, const char *file, int line);
+	};
+
+static int set_dynlocking_callback_once_callback(void *data, void *out)
+	{
+	struct dynlocking_once_arg *once_arg = data;
+	dynlock_create_callback = once_arg->dyn_create_function;
+	dynlock_lock_callback = once_arg->dyn_lock_function;
+	dynlock_destroy_callback = once_arg->dyn_destroy_function;
+	return 1;
+	}
 
 /*
  * NOTE: the default inplementation is a mutex, but mostly what's used
  * is CRYPTO_[rw]_lock(), so we might do well to have a default
  * implementation that uses rw locks instead of mutexes.
  */
+/* XXX Add dynlock default implementation */
 #ifdef OPENSSL_SYS_WIN32
 static HANDLE *lock_cs;
 #elif HAVE_PTHREAD
@@ -216,37 +234,82 @@ static void default_locking_callback_default(int mode, int type, const
 	{
 #ifdef OPENSSL_SYS_WIN32
 	if (mode & CRYPTO_LOCK)
-		{
 		WaitForSingleObject(lock_cs[type],INFINITE);
-		}
 	else
-		{
 		ReleaseMutex(lock_cs[type]);
-		}
-	}
-	return;
 #elif HAVE_PTHREAD
+	int ret;
 	if (mode & CRYPTO_LOCK)
-		pthread_mutex_lock(&(lock_cs[type]));
+		ret = pthread_mutex_lock(&(lock_cs[type]));
 	else
-		pthread_mutex_unlock(&(lock_cs[type]));
+		ret = pthread_mutex_unlock(&(lock_cs[type]));
+	OPENSSL_assert(ret == 0);
 #else
 	/* XXX Add all the OS support from crypto/thread/ *.c */
 #endif
 	}
 
+#ifdef OPENSSL_SYS_WIN32
+struct CRYPTO_dynlock_value *default_dyn_create_function(const char *file, int line)
+	{
+	HANDLE *l = OPENSSL_malloc(sizeof(HANDLE));
+	*l = CreateMutex(NULL, FALSE, NULL);
+	return (struct CRYPTO_dynlock_value *)l;
+	}
+
+void default_dyn_lock_function(int mode, struct CRYPTO_dynlock_value *l, const char *file, int line)
+	{
+	if (mode & CRYPTO_LOCK)
+		WaitForSingleObject(*(HANDLE *)l,INFINITE);
+	else
+		ReleaseMutex(*(HANDLE *)l);
+	}
+
+void default_dyn_destroy_function(struct CRYPTO_dynlock_value *l, const char *file, int line)
+	{
+	CloseHandle(*(HANDLE *)l);
+	OPENSSL_free(l);
+	}
+#elif HAVE_PTHREAD
+struct CRYPTO_dynlock_value *default_dyn_create_function(const char *file, int line)
+	{
+	int ret;
+	pthread_mutex_t *l = OPENSSL_malloc(sizeof(pthread_mutex_t));
+	ret = pthread_mutex_init((pthread_mutex_t *)l, NULL);
+	OPENSSL_assert(ret);
+	return (struct CRYPTO_dynlock_value *)l;
+	}
+
+void default_dyn_lock_function(int mode, struct CRYPTO_dynlock_value *l, const char *file, int line)
+	{
+	int ret;
+	if (mode & CRYPTO_LOCK)
+		ret = pthread_mutex_lock((pthread_mutex_t *)l);
+	else
+		ret = pthread_mutex_unlock((pthread_mutex_t *)l);
+	OPENSSL_assert(ret == 0);
+	}
+
+void default_dyn_destroy_function(struct CRYPTO_dynlock_value *l, const char *file, int line)
+	{
+	int ret;
+	ret = pthread_mutex_destroy((pthread_mutex_t *)l);
+	OPENSSL_assert(ret);
+	}
+#endif
+
 static void default_locking_init(void)
 	{
 #ifdef OPENSSL_SYS_WIN32
 	int i;
-	lock_cs=OPENSSL_malloc(CRYPTO_num_locks() * sizeof(HANDLE));
-	for (i=0; i<CRYPTO_num_locks(); i++)
-		lock_cs[i]=CreateMutex(NULL,FALSE,NULL);
+	lock_cs = OPENSSL_malloc(CRYPTO_num_locks() * sizeof(HANDLE));
+	for (i = 0; i < CRYPTO_num_locks(); i++)
+		lock_cs[i] = CreateMutex(NULL, FALSE, NULL);
 #elif HAVE_PTHREAD
 	int i;
-	lock_cs=OPENSSL_malloc(CRYPTO_num_locks() * sizeof(pthread_mutex_t));
-	for (i=0; i<CRYPTO_num_locks(); i++)
-		pthread_mutex_init(&(lock_cs[i]),NULL);
+	lock_cs = OPENSSL_malloc(CRYPTO_num_locks() * sizeof(pthread_mutex_t));
+	for (i = 0; i < CRYPTO_num_locks(); i++)
+		pthread_mutex_init(&(lock_cs[i]), NULL);
 #else
 	/* XXX Add all the OS support from crypto/thread/ *.c */
 #endif
@@ -476,6 +539,20 @@ void (*CRYPTO_get_dynlock_destroy_callback(void))
 	(struct CRYPTO_dynlock_value *l, const char *file,int line)
 	{
 	return(dynlock_destroy_callback);
+	}
+
+void CRYPTO_set_dynlock_callbacks(struct CRYPTO_dynlock_value *(*dyn_create_function)(const char *file, int line),
+                                  void (*dyn_lock_function)(int mode, struct CRYPTO_dynlock_value *l, const char *file, int line),
+                                  void (*dyn_destroy_function)(struct CRYPTO_dynlock_value *l, const char *file, int line))
+	{
+	struct dynlocking_once_arg once_arg;
+
+	once_arg.dyn_create_function = dyn_create_function;
+	once_arg.dyn_lock_function = dyn_lock_function;
+	once_arg.dyn_destroy_function = dyn_destroy_function;
+	(void)CRYPTO_ONCE_once(&dynlocking_callback_once,
+			       set_dynlocking_callback_once_callback,
+			       &once_arg, NULL);
 	}
 
 void CRYPTO_set_dynlock_create_callback(struct CRYPTO_dynlock_value *(*func)
