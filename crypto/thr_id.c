@@ -167,7 +167,7 @@ struct once_arg
         void *out;
         int result;
         };
-static void once_arg_key_once_init(void *data)
+static void once_arg_key_once_init(void)
         {
         (void) pthread_key_create(&once_arg_key, NULL);
         }
@@ -184,11 +184,11 @@ int CRYPTO_ONCE_once(CRYPTO_ONCE *once, CRYPTO_ONCE_callback init_cb, void *data
         once_arg.data = data;
         once_arg.out = out;
         once_arg.result = 0;
-        if (pthread_once(once_arg_key_once, once_arg_key_once_init) != 0)
+        if (pthread_once(&once_arg_key_once, once_arg_key_once_init) != 0)
                 return 0;
         if (pthread_setspecific(once_arg_key, &once_arg) != 0)
                 return 0;
-        if (pthread_once(once, init_cb) == 0)
+        if (pthread_once(once, CRYPTO_ONCE_init_function) == 0)
                 return once_arg.result;
         return 0;
         }
@@ -199,6 +199,42 @@ int CRYPTO_ONCE_once(CRYPTO_ONCE *once, CRYPTO_ONCE_callback init_cb, void *data
         return init_cb(data, out);
         }
 #endif
+
+static CRYPTO_ONCE threadid_callback_once = CRYPTO_ONCE_INIT;
+
+static int THREADID_set_callback_once_callback(void *data, void *out)
+        {
+	if (threadid_callback == NULL)
+                threadid_callback = data;
+        return 1;
+        }
+
+static void THREADID_callback_default(CRYPTO_THREADID *id)
+        {
+#ifndef OPENSSL_NO_DEPRECATED
+	/* If the deprecated callback was set, fall back to that */
+	if (id_callback)
+		{
+		CRYPTO_THREADID_set_numeric(id, id_callback());
+		return;
+		}
+#endif
+#ifdef OPENSSL_SYS_WIN16
+	CRYPTO_THREADID_set_numeric(id, (unsigned long)GetCurrentTask());
+#elif defined(OPENSSL_SYS_WIN32)
+	CRYPTO_THREADID_set_numeric(id, (unsigned long)GetCurrentThreadId());
+#elif defined(OPENSSL_SYS_BEOS)
+	CRYPTO_THREADID_set_numeric(id, (unsigned long)find_thread(NULL));
+#else
+        /*
+         * For everything else, default to using the address of 'errno'
+         * On POSIX we can't use pthread_self() because pthread_t is so
+         * opaque we can't even compare values of that type with the C
+         * equality comparison operators.
+         */
+	CRYPTO_THREADID_set_pointer(id, (void*)&errno);
+#endif
+        }
 
 /* the memset() here and in set_pointer() seem overkill, but for the sake of
  * CRYPTO_THREADID_cmp() this avoids any platform silliness that might cause two
@@ -248,43 +284,40 @@ void CRYPTO_THREADID_set_pointer(CRYPTO_THREADID *id, void *ptr)
 
 int CRYPTO_THREADID_set_callback(void (*func)(CRYPTO_THREADID *))
 	{
-	if (threadid_callback)
-		return 0;
-	threadid_callback = func;
-	return 1;
+        return CRYPTO_ONCE_once(&threadid_callback_once,
+                                THREADID_set_callback_once_callback,
+                                func, NULL);
+        if (threadid_callback != func)
+                return 0;
+        return 1;
 	}
 
 void (*CRYPTO_THREADID_get_callback(void))(CRYPTO_THREADID *)
 	{
+        (void)CRYPTO_ONCE_once(&threadid_callback_once,
+                               THREADID_set_callback_once_callback,
+                               THREADID_callback_default, NULL);
 	return threadid_callback;
 	}
 
 void CRYPTO_THREADID_current(CRYPTO_THREADID *id)
 	{
+        (void)CRYPTO_ONCE_once(&threadid_callback_once,
+                               THREADID_set_callback_once_callback,
+                               THREADID_callback_default, NULL);
+        /*
+         * Once we have CRYPTO_ONCE_once() working correctly on *all*
+         * platforms we should OPENSSL_assert(threadid_callback) here.
+         *
+         * For now we continue to fallback on default behavior.
+         */
 	if (threadid_callback)
 		{
 		threadid_callback(id);
 		return;
 		}
-#ifndef OPENSSL_NO_DEPRECATED
-	/* If the deprecated callback was set, fall back to that */
-	if (id_callback)
-		{
-		CRYPTO_THREADID_set_numeric(id, id_callback());
-		return;
-		}
-#endif
 	/* Else pick a backup */
-#ifdef OPENSSL_SYS_WIN16
-	CRYPTO_THREADID_set_numeric(id, (unsigned long)GetCurrentTask());
-#elif defined(OPENSSL_SYS_WIN32)
-	CRYPTO_THREADID_set_numeric(id, (unsigned long)GetCurrentThreadId());
-#elif defined(OPENSSL_SYS_BEOS)
-	CRYPTO_THREADID_set_numeric(id, (unsigned long)find_thread(NULL));
-#else
-	/* For everything else, default to using the address of 'errno' */
-	CRYPTO_THREADID_set_pointer(id, (void*)&errno);
-#endif
+        THREADID_callback_default(id);
 	}
 
 int CRYPTO_THREADID_cmp(const CRYPTO_THREADID *a, const CRYPTO_THREADID *b)
@@ -303,36 +336,38 @@ unsigned long CRYPTO_THREADID_hash(const CRYPTO_THREADID *id)
 	}
 
 #ifndef OPENSSL_NO_DEPRECATED
+static int set_id_callback_once_callback(void *data, void *out)
+        {
+        /*
+         * Eventually should OPENSSL_assert() that threadid_callback &&
+         * id_callback are NULL.
+         */
+	if (threadid_callback || id_callback)
+                return 0;
+        id_callback = data;
+        return 1;
+        }
+
 unsigned long (*CRYPTO_get_id_callback(void))(void)
 	{
-	return(id_callback);
+        (void)CRYPTO_ONCE_once(&threadid_callback_once,
+                               THREADID_set_callback_once_callback,
+                               THREADID_callback_default, NULL);
+	return(CRYPTO_thread_id);
 	}
 
 void CRYPTO_set_id_callback(unsigned long (*func)(void))
 	{
+        (void)CRYPTO_ONCE_once(&threadid_callback_once,
+                               set_id_callback_once_callback,
+                               func, NULL);
 	id_callback=func;
 	}
 
 unsigned long CRYPTO_thread_id(void)
-	{
-	unsigned long ret=0;
-
-	if (id_callback == NULL)
-		{
-#ifdef OPENSSL_SYS_WIN16
-		ret=(unsigned long)GetCurrentTask();
-#elif defined(OPENSSL_SYS_WIN32)
-		ret=(unsigned long)GetCurrentThreadId();
-#elif defined(GETPID_IS_MEANINGLESS)
-		ret=1L;
-#elif defined(OPENSSL_SYS_BEOS)
-		ret=(unsigned long)find_thread(NULL);
-#else
-		ret=(unsigned long)getpid();
-#endif
-		}
-	else
-		ret=id_callback();
-	return(ret);
-	}
+        {
+        CRYPTO_THREADID id;
+        CRYPTO_THREADID_current(&id);
+        return id.val;
+        }
 #endif
